@@ -20,6 +20,11 @@ class UpstreamError(RuntimeError):
     """CNMV could not be reached successfully."""
 
 
+def _normalize_nif(nif: str) -> str:
+    match = re.fullmatch(r"([Aa])-?(\d{8})", nif)
+    return f"{match[1].upper()}-{match[2]}" if match else nif
+
+
 def fetch_filings(
     nif: str, *, transport: httpx.BaseTransport | None = None
 ) -> list[dict[str, object]]:
@@ -32,7 +37,7 @@ def fetch_filings(
         ) as client:
             response = client.get(
                 IFA_URL,
-                params={"id": "0", "lang": "es", "nif": nif},
+                params={"id": "0", "lang": "es", "nif": _normalize_nif(nif)},
             )
             response.raise_for_status()
     except httpx.HTTPError as exc:

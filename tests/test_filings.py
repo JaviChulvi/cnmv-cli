@@ -9,7 +9,7 @@ from cnmv_cli.filings import (
 )
 
 PAGE_URL = (
-    "https://www.cnmv.es/portal/consultas/ifa/listadoifa?id=0&lang=es&nif=A12345678"
+    "https://www.cnmv.es/portal/consultas/ifa/listadoifa?id=0&lang=es&nif=A-12345678"
 )
 
 HTML = """
@@ -116,17 +116,34 @@ def test_parse_filings_ignores_non_filing_table_rows() -> None:
     assert len(filings) == 2
 
 
-def test_fetch_filings_requests_official_ifa_page() -> None:
+@pytest.mark.parametrize("nif", ["A12345678", "A-12345678", "a12345678", "a-12345678"])
+def test_fetch_filings_requests_official_ifa_page(nif: str) -> None:
     requested_urls: list[httpx.URL] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         requested_urls.append(request.url)
         return httpx.Response(200, content=HTML)
 
-    filings = fetch_filings("A12345678", transport=httpx.MockTransport(handler))
+    filings = fetch_filings(nif, transport=httpx.MockTransport(handler))
 
     assert len(filings) == 2
     assert requested_urls == [httpx.URL(PAGE_URL)]
+
+
+def test_fetch_filings_leaves_non_a_prefixes_unchanged() -> None:
+    requested_urls: list[httpx.URL] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requested_urls.append(request.url)
+        return httpx.Response(200, content=HTML)
+
+    fetch_filings("B12345678", transport=httpx.MockTransport(handler))
+
+    assert requested_urls == [
+        httpx.URL(
+            "https://www.cnmv.es/portal/consultas/ifa/listadoifa?id=0&lang=es&nif=B12345678"
+        )
+    ]
 
 
 @pytest.mark.parametrize("failure", ["status", "connection"])
