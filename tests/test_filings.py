@@ -116,18 +116,42 @@ def test_parse_filings_ignores_non_filing_table_rows() -> None:
     assert len(filings) == 2
 
 
-@pytest.mark.parametrize("nif", ["A12345678", "A-12345678", "a12345678", "a-12345678"])
-def test_fetch_filings_requests_official_ifa_page(nif: str) -> None:
-    requested_urls: list[httpx.URL] = []
+def test_fetch_filings_literal_success_makes_one_request() -> None:
+    requested_nifs: list[str] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
-        requested_urls.append(request.url)
+        requested_nifs.append(request.url.params["nif"])
         return httpx.Response(200, content=HTML)
+
+    filings = fetch_filings("a12345678", transport=httpx.MockTransport(handler))
+
+    assert len(filings) == 2
+    assert requested_nifs == ["a12345678"]
+
+
+@pytest.mark.parametrize(
+    ("nif", "expected_requests"),
+    [
+        ("A12345678", ["A12345678", "A-12345678"]),
+        ("A-12345678", ["A-12345678", "A12345678"]),
+        ("a12345678", ["a12345678", "A-12345678"]),
+        ("a-12345678", ["a-12345678", "A12345678"]),
+    ],
+)
+def test_fetch_filings_retries_alternate_a_format_when_table_is_missing(
+    nif: str, expected_requests: list[str]
+) -> None:
+    requested_nifs: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requested_nifs.append(request.url.params["nif"])
+        content = HTML if len(requested_nifs) == 2 else b"<html><body></body></html>"
+        return httpx.Response(200, content=content)
 
     filings = fetch_filings(nif, transport=httpx.MockTransport(handler))
 
     assert len(filings) == 2
-    assert requested_urls == [httpx.URL(PAGE_URL)]
+    assert requested_nifs == expected_requests
 
 
 def test_fetch_filings_leaves_non_a_prefixes_unchanged() -> None:
@@ -147,11 +171,56 @@ def test_fetch_filings_leaves_non_a_prefixes_unchanged() -> None:
 
 
 @pytest.mark.parametrize("failure", ["status", "connection"])
-def test_fetch_filings_reports_upstream_failures(failure: str) -> None:
+def test_fetch_filings_does_not_retry_upstream_failures(failure: str) -> None:
+    requested_nifs: list[str] = []
+
     def handler(request: httpx.Request) -> httpx.Response:
+        requested_nifs.append(request.url.params["nif"])
         if failure == "connection":
             raise httpx.ConnectError("offline", request=request)
         return httpx.Response(503, request=request)
 
     with pytest.raises(UpstreamError, match="CNMV request failed"):
         fetch_filings("A12345678", transport=httpx.MockTransport(handler))
+
+    assert requested_nifs == ["A12345678"]
+
+
+def test_fetch_filings_does_not_retry_other_malformed_pages() -> None:
+    requested_nifs: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requested_nifs.append(request.url.params["nif"])
+        return httpx.Response(
+            200,
+            content=(
+                b'<table id="ctl00_ContentPrincipal_gridInformes">'
+                b'<tr><td data-th="unexpected">value</td></tr></table>'
+            ),
+        )
+
+    with pytest.raises(
+        MalformedPageError, match="filing row is missing required cells"
+    ):
+        fetch_filings("A12345678", transport=httpx.MockTransport(handler))
+
+    assert requested_nifs == ["A12345678"]
+
+
+def test_fetch_filings_reports_both_a_formats_missing_table() -> None:
+    requested_nifs: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requested_nifs.append(request.url.params["nif"])
+        return httpx.Response(200, content=b"<html><body></body></html>")
+
+    with pytest.raises(
+        MalformedPageError,
+        match=(
+            r"CNMV page is missing the ctl00_ContentPrincipal_gridInformes table "
+            r"for NIF representations: A12345678, A-12345678"
+        ),
+    ):
+        fetch_filings("A12345678", transport=httpx.MockTransport(handler))
+
+    assert requested_nifs == ["A12345678", "A-12345678"]

@@ -20,30 +20,40 @@ class UpstreamError(RuntimeError):
     """CNMV could not be reached successfully."""
 
 
-def _normalize_nif(nif: str) -> str:
-    match = re.fullmatch(r"([Aa])-?(\d{8})", nif)
-    return f"{match[1].upper()}-{match[2]}" if match else nif
-
-
 def fetch_filings(
     nif: str, *, transport: httpx.BaseTransport | None = None
 ) -> list[dict[str, object]]:
-    try:
-        with httpx.Client(
-            transport=transport,
-            follow_redirects=True,
-            timeout=30.0,
-            headers={"User-Agent": "cnmv-cli/0.1"},
-        ) as client:
-            response = client.get(
-                IFA_URL,
-                params={"id": "0", "lang": "es", "nif": _normalize_nif(nif)},
-            )
-            response.raise_for_status()
-    except httpx.HTTPError as exc:
-        raise UpstreamError(f"CNMV request failed: {exc}") from exc
+    candidates = [nif]
+    match = re.fullmatch(r"[Aa](-?)(\d{8})", nif)
+    if match:
+        candidates.append(f"A{'' if match[1] else '-'}{match[2]}")
 
-    return parse_filings(response.content, str(response.url))
+    missing_table_error = f"CNMV page is missing the {TABLE_ID} table"
+    with httpx.Client(
+        transport=transport,
+        follow_redirects=True,
+        timeout=30.0,
+        headers={"User-Agent": "cnmv-cli/0.1"},
+    ) as client:
+        for candidate in candidates:
+            try:
+                response = client.get(
+                    IFA_URL,
+                    params={"id": "0", "lang": "es", "nif": candidate},
+                )
+                response.raise_for_status()
+            except httpx.HTTPError as exc:
+                raise UpstreamError(f"CNMV request failed: {exc}") from exc
+
+            try:
+                return parse_filings(response.content, str(response.url))
+            except MalformedPageError as exc:
+                if str(exc) != missing_table_error:
+                    raise
+
+    raise MalformedPageError(
+        f"{missing_table_error} for NIF representations: {', '.join(candidates)}"
+    ) from None
 
 
 def _text(element: html.HtmlElement) -> str:
@@ -63,8 +73,10 @@ def parse_filings(content: bytes, page_url: str) -> list[dict[str, object]]:
         raise MalformedPageError("CNMV returned invalid HTML") from exc
 
     tables = document.xpath(f'//table[@id="{TABLE_ID}"]')
-    if len(tables) != 1:
+    if not tables:
         raise MalformedPageError(f"CNMV page is missing the {TABLE_ID} table")
+    if len(tables) != 1:
+        raise MalformedPageError(f"CNMV page has multiple {TABLE_ID} tables")
 
     filings: list[dict[str, object]] = []
     for row in tables[0].xpath(".//tr[td]"):
