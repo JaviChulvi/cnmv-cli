@@ -111,3 +111,41 @@ def test_filing_download_reports_invalid_url_without_network(tmp_path) -> None:
 
     assert result.exit_code == 1
     assert "must use HTTPS on cnmv.es" in result.stderr
+
+
+def test_filing_compare_prints_json(monkeypatch, tmp_path) -> None:
+    expected = {
+        "older": {"url": "https://www.cnmv.es/old.xhtml", "sha256": "a", "byte_count": 1},
+        "newer": {"url": "https://www.cnmv.es/new.xhtml", "sha256": "b", "byte_count": 2},
+        "changes": [],
+    }
+    seen = []
+
+    def fake_compare(older_url: str, newer_url: str, database: Path):
+        seen.append((older_url, newer_url, database))
+        return expected
+
+    monkeypatch.setattr(cli, "compare_filings", fake_compare)
+    result = runner.invoke(
+        cli.app,
+        [
+            "filing",
+            "compare",
+            "--older-url",
+            "https://www.cnmv.es/old.xhtml",
+            "--newer-url",
+            "https://www.cnmv.es/new.xhtml",
+            "--database",
+            str(tmp_path / "db"),
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert seen == [
+        (
+            "https://www.cnmv.es/old.xhtml",
+            "https://www.cnmv.es/new.xhtml",
+            tmp_path / "db",
+        )
+    ]
+    assert json.loads(result.stdout) == expected
