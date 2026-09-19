@@ -77,9 +77,9 @@ not access the network.
 
 The [CLI checks workflow](https://github.com/JaviChulvi/cnmv-cli/actions/workflows/cli-checks.yml) runs the
 regression suite, lint, compilation, and installed-command help checks on Python
-3.11 and 3.14 for every pull request, push to `main`, and nightly at **02:17 UTC**
-(03:17 Madrid winter time / 04:17 summer time). It also supports **Run workflow**
-in the repository's Actions tab.
+3.11 and 3.14 for every pull request, push to `main`, and nightly at **21:00 Madrid
+time** (`Europe/Madrid`, automatically adjusting for daylight saving time). It
+also supports **Run workflow** in the repository's Actions tab.
 
 Nightly and manual runs include a separate **Live CNMV** job. It lists filings
 for `A08001851`, selects the latest two distinct periods with consolidated XHTML

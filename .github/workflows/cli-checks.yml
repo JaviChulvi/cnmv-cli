@@ -5,8 +5,8 @@ on:
   push:
     branches: [main]
   schedule:
-    # 03:17 in Madrid in winter; 04:17 in summer.
-    - cron: '17 2 * * *'
+    - cron: '0 21 * * *'
+      timezone: 'Europe/Madrid'
   workflow_dispatch:
 
 permissions:
