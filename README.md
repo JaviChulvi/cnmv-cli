@@ -70,8 +70,36 @@ uv run pytest
 uv run python -m compileall -q src tests
 ```
 
-Tests use local fixtures and mocked HTTP responses; they do not access the
-network.
+The default test suite uses local fixtures and mocked HTTP responses; it does
+not access the network.
+
+### Automated CLI checks
+
+The [CLI checks workflow](https://github.com/JaviChulvi/cnmv-cli/actions/workflows/cli-checks.yml) runs the
+regression suite, lint, compilation, and installed-command help checks on Python
+3.11 and 3.14 for every pull request, push to `main`, and nightly at **02:17 UTC**
+(03:17 Madrid winter time / 04:17 summer time). It also supports **Run workflow**
+in the repository's Actions tab.
+
+Nightly and manual runs include a separate **Live CNMV** job. It lists filings
+for `A08001851`, selects the latest two distinct periods with consolidated XHTML
+documents, downloads one and verifies its hash and size, then compares the pair
+using a temporary Chroma database. The job validates JSON output and provenance
+and logs the selected periods, registration numbers, URLs, hashes, and change
+count. It retries a reported upstream request failure once; persistent failures
+fail the job. A live failure can also indicate a CNMV outage or page change.
+
+To run the same live check locally:
+
+```console
+CNMV_LIVE_TESTS=1 uv run pytest -v -s tests/test_live.py
+```
+
+No API keys or repository secrets are required. Results and failing commands
+appear in Actions; enable GitHub Actions notifications in your GitHub account
+if you want email alerts. Scheduled runs begin once the workflow is on `main`;
+GitHub may delay them and disables schedules in public repositories after 60
+days without repository activity.
 
 This MVP intentionally does not implement XBRL extraction, financial metrics,
 LLM-generated narrative, or external services.
