@@ -1,6 +1,7 @@
 import json
 from pathlib import Path
 
+import httpx
 from typer.testing import CliRunner
 
 from cnmv_cli import cli
@@ -51,6 +52,7 @@ def test_filing_list_emits_json_lines_by_default(monkeypatch) -> None:
 def test_filing_list_returns_nonzero_for_clear_service_errors(monkeypatch) -> None:
     for error in (
         UpstreamError("CNMV request failed: 503"),
+        UpstreamError.from_request(httpx.ReadTimeout(""), "https://www.cnmv.es/list"),
         MalformedPageError("missing table"),
     ):
         monkeypatch.setattr(

@@ -1,3 +1,6 @@
+import ssl
+import urllib.error
+
 import httpx
 import pytest
 
@@ -170,7 +173,7 @@ def test_fetch_filings_leaves_non_a_prefixes_unchanged() -> None:
     ]
 
 
-@pytest.mark.parametrize("failure", ["status", "connection"])
+@pytest.mark.parametrize("failure", ["status", "connection", "timeout"])
 def test_fetch_filings_does_not_retry_upstream_failures(failure: str) -> None:
     requested_nifs: list[str] = []
 
@@ -178,12 +181,48 @@ def test_fetch_filings_does_not_retry_upstream_failures(failure: str) -> None:
         requested_nifs.append(request.url.params["nif"])
         if failure == "connection":
             raise httpx.ConnectError("offline", request=request)
+        if failure == "timeout":
+            raise httpx.ReadTimeout("", request=request)
         return httpx.Response(503, request=request)
 
-    with pytest.raises(UpstreamError, match="CNMV request failed"):
+    with pytest.raises(
+        UpstreamError, match="CNMV request failed: \\[retryable\\]"
+    ) as error:
         fetch_filings("A12345678", transport=httpx.MockTransport(handler))
 
     assert requested_nifs == ["A12345678"]
+    assert (
+        "https://www.cnmv.es/portal/consultas/ifa/listadoifa?id=0&lang=es&nif=A12345678"
+        in str(error.value)
+    )
+    if failure == "timeout":
+        assert "ReadTimeout" in str(error.value)
+
+
+@pytest.mark.parametrize(
+    "status", [400, 401, 403, 404, 408, 429, 500, 501, 502, 503, 504]
+)
+def test_request_error_classifies_http_status_for_both_clients(status: int) -> None:
+    response = httpx.Response(status, request=httpx.Request("GET", PAGE_URL))
+    errors = (
+        httpx.HTTPStatusError(
+            "HTTP failure", request=response.request, response=response
+        ),
+        urllib.error.HTTPError(PAGE_URL, status, "HTTP failure", {}, None),
+    )
+    for error in errors:
+        message = str(UpstreamError.from_request(error, PAGE_URL))
+        assert ("[retryable]" in message) == (status in {408, 429, 500, 502, 503, 504})
+        assert type(error).__name__ in message
+        assert PAGE_URL in message
+
+
+def test_request_error_does_not_retry_certificate_failures() -> None:
+    certificate_error = ssl.SSLCertVerificationError("certificate verify failed")
+    httpx_error = httpx.ConnectError("certificate verify failed")
+    httpx_error.__cause__ = certificate_error
+    for error in (httpx_error, urllib.error.URLError(certificate_error)):
+        assert "[retryable]" not in str(UpstreamError.from_request(error, PAGE_URL))
 
 
 def test_fetch_filings_does_not_retry_other_malformed_pages() -> None:

@@ -70,7 +70,7 @@ terminal(command="uv run cnmv filing compare --older-url 'https://www.cnmv.es/â€
 - Exit code `1` with an error containing `must use HTTPS on cnmv.es` means the source URL or a redirect is outside the allowed official origin. Obtain a URL from `filing list`; do not bypass the guard.
 - `unsupported content type` means the response is not HTML/XHTML. Select a `consolidated_xhtml` or `individual_xhtml` URL instead of a ZIP/PDF endpoint.
 - `HTML/XHTML document has no body` or `has no visible text` means the response cannot be compared safely. Preserve the failing URL and content type; do not present a partial delta.
-- `CNMV request failed` is an upstream/network failure. Retry once after a short delay, then report the failure; do not substitute another source. For `CNMV page is missing`, `multiple ... tables`, or `filing row is missing required cells`, stop and report a CNMV page-format failure; do not retry or guess fields.
+- `CNMV request failed: [retryable]` identifies a timeout, connection/transport failure, or temporary HTTP status (408, 429, 500, 502, 503, 504). Retry once after 10 seconds, then report the failure; do not substitute another source. Request errors include the exception type and URL. Errors without this marker, including permanent HTTP errors, certificate failures, and malformed pages, should not be retried.
 
 ## Development Verification
 
@@ -81,6 +81,8 @@ terminal(command="uv sync --all-groups && uv run pytest -q && uv run ruff check 
 ```
 
 For a live end-to-end check, first call `filing list`, retain the selected metadata, then compare two real `consolidated_xhtml` URLs with a disposable database directory. Remove generated database directories before staging.
+
+`CNMV_LIVE_TESTS=1 uv run pytest -v -s tests/test_live.py` runs the live smoke plus offline tests of its retry/deadline handling. The smoke shares a 16-minute budget across list, download, compare, and retry delays; the Actions test step is capped at 17 minutes within the 20-minute job. Each attempt logs its limit, duration, and exit status. A subprocess timeout fails immediately with captured output; it does not start another attempt.
 
 ## Pitfalls
 

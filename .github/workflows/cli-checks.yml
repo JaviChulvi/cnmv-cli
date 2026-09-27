@@ -62,6 +62,7 @@ jobs:
       - name: Install locked dependencies
         run: uv sync --locked --all-groups
       - name: Exercise real CNMV filings
+        timeout-minutes: 17
         env:
           CNMV_LIVE_TESTS: '1'
         run: uv run --no-sync pytest -v -s tests/test_live.py
