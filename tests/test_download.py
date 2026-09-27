@@ -1,4 +1,6 @@
+import errno
 import hashlib
+import socket
 import urllib.error
 from collections.abc import Iterable
 from typing import Self
@@ -213,14 +215,51 @@ def test_download_document_stream_cap_preserves_existing_output_and_cleans_temp(
     assert list(tmp_path.glob(".*.part")) == []
 
 
-def test_download_document_wraps_url_errors(monkeypatch, tmp_path) -> None:
+@pytest.mark.parametrize(
+    ("error", "retryable", "kind"),
+    [
+        (urllib.error.URLError("offline"), False, "URLError"),
+        (urllib.error.URLError(TimeoutError("timed out")), True, "TimeoutError"),
+        (
+            urllib.error.URLError(OSError(errno.ENETUNREACH, "unreachable")),
+            True,
+            "OSError",
+        ),
+        (
+            urllib.error.URLError(
+                socket.gaierror(socket.EAI_AGAIN, "temporary DNS failure")
+            ),
+            True,
+            "gaierror",
+        ),
+        (
+            urllib.error.URLError(socket.gaierror(socket.EAI_NONAME, "unknown host")),
+            False,
+            "gaierror",
+        ),
+        (ConnectionResetError("reset"), True, "ConnectionResetError"),
+        (PermissionError("denied"), False, "PermissionError"),
+        (
+            FileNotFoundError(errno.ENOENT, "missing directory"),
+            False,
+            "FileNotFoundError",
+        ),
+    ],
+)
+def test_download_document_wraps_url_errors(
+    monkeypatch, tmp_path, error, retryable, kind
+) -> None:
     class FailingOpener:
         def open(self, request: object, *, timeout: float) -> None:
-            raise urllib.error.URLError("offline")
+            raise error
 
     monkeypatch.setattr(
         download.urllib.request, "build_opener", lambda *args: FailingOpener()
     )
 
-    with pytest.raises(download.UpstreamError, match="CNMV request failed:.*offline"):
+    with pytest.raises(download.UpstreamError, match="CNMV request failed:") as caught:
         download_document(DOCUMENT_URL, tmp_path / "document")
+    message = str(caught.value)
+    assert ("[retryable]" in message) == retryable
+    assert kind in message
+    assert DOCUMENT_URL in message

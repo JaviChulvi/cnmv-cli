@@ -87,7 +87,7 @@ def download_document(url: str, output: Path) -> dict[str, object]:
     except (InvalidDocumentUrl, UpstreamError):
         raise
     except (urllib.error.URLError, http.client.HTTPException, OSError) as exc:
-        raise UpstreamError(f"CNMV request failed: {exc}") from exc
+        raise UpstreamError.from_request(exc, current_url) from exc
 
 
 def _write_response(

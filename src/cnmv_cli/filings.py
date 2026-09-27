@@ -1,7 +1,12 @@
 from __future__ import annotations
 
+import errno
+import http.client
 import re
+import socket
+import ssl
 import unicodedata
+import urllib.error
 from urllib.parse import urljoin
 
 import httpx
@@ -18,6 +23,51 @@ class MalformedPageError(ValueError):
 
 class UpstreamError(RuntimeError):
     """CNMV could not be reached successfully."""
+
+    @classmethod
+    def from_request(cls, exc: Exception, url: str) -> UpstreamError:
+        reason = (
+            exc.reason
+            if isinstance(exc, urllib.error.URLError)
+            and not isinstance(exc, urllib.error.HTTPError)
+            else exc
+        )
+        retryable = (
+            isinstance(
+                reason,
+                (
+                    httpx.TimeoutException,
+                    httpx.NetworkError,
+                    httpx.RemoteProtocolError,
+                    TimeoutError,
+                    ConnectionError,
+                    http.client.IncompleteRead,
+                ),
+            )
+            or (
+                isinstance(reason, OSError)
+                and reason.errno in {errno.ENETUNREACH, errno.EHOSTUNREACH}
+            )
+            or (
+                isinstance(reason, socket.gaierror) and reason.errno == socket.EAI_AGAIN
+            )
+        )
+        if isinstance(exc, (httpx.HTTPStatusError, urllib.error.HTTPError)):
+            status = (
+                exc.response.status_code
+                if isinstance(exc, httpx.HTTPStatusError)
+                else exc.code
+            )
+            retryable = status in {408, 429, 500, 502, 503, 504}
+        # Certificate failures are permanent, even when wrapped as connection errors.
+        cause = reason
+        while isinstance(cause, BaseException):
+            if isinstance(cause, ssl.SSLError):
+                retryable = False
+            cause = cause.__cause__ or cause.__context__
+        marker = "[retryable] " if retryable else ""
+        kind = type(reason if isinstance(reason, BaseException) else exc).__name__
+        return cls(f"CNMV request failed: {marker}{kind} at {url}: {exc}")
 
 
 def fetch_filings(
@@ -43,7 +93,7 @@ def fetch_filings(
                 )
                 response.raise_for_status()
             except httpx.HTTPError as exc:
-                raise UpstreamError(f"CNMV request failed: {exc}") from exc
+                raise UpstreamError.from_request(exc, str(exc.request.url)) from exc
 
             try:
                 return parse_filings(response.content, str(response.url))

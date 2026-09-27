@@ -7,42 +7,164 @@ import os
 import subprocess
 import time
 from datetime import UTC, datetime
+from unittest.mock import Mock
 
 import pytest
 
-pytestmark = pytest.mark.skipif(
+SMOKE_TIMEOUT = 16 * 60
+RETRY_DELAY = 10
+
+
+@pytest.fixture
+def cli_process(monkeypatch):
+    now = [0.0]
+    process = Mock()
+    sleep = Mock(side_effect=lambda seconds: now.__setitem__(0, now[0] + seconds))
+    monkeypatch.setattr(subprocess, "run", process)
+    monkeypatch.setattr(time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(time, "sleep", sleep)
+    return process, sleep, now
+
+
+@pytest.mark.parametrize("recovers", [True, False])
+def test_run_cli_retries_transient_failure_once(cli_process, capsys, recovers) -> None:
+    process, sleep, now = cli_process
+    failure = subprocess.CompletedProcess(
+        ["cnmv"],
+        1,
+        "",
+        "Error: CNMV request failed: [retryable] ReadTimeout at https://www.cnmv.es/",
+    )
+    success = subprocess.CompletedProcess(["cnmv"], 0, "result", "")
+    process.side_effect = [failure, success if recovers else failure]
+    if recovers:
+        assert run_cli("filing", "list", deadline=60) == "result"
+    else:
+        with pytest.raises(pytest.fail.Exception, match="attempt 2/2.*ReadTimeout"):
+            run_cli("filing", "list", deadline=60)
+    assert process.call_count == 2
+    sleep.assert_called_once_with(10)
+    assert [call.kwargs["timeout"] for call in process.call_args_list] == [60, 50]
+    assert now[0] == 10
+    assert "Attempt 1/2 finished in 0.0s, exit=1" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        "Error: CNMV request failed: HTTPStatusError at https://www.cnmv.es/: 404",
+        "Error: CNMV page is missing the table",
+        "Error: unsupported content type",
+        "Error: CNMV request failed: redirect has no Location",
+    ],
+)
+def test_run_cli_does_not_retry_permanent_errors(cli_process, error) -> None:
+    process, sleep, _ = cli_process
+    process.return_value = subprocess.CompletedProcess(["cnmv"], 1, "", error)
+    with pytest.raises(pytest.fail.Exception, match="attempt 1/2 failed"):
+        run_cli("filing", "list", deadline=60)
+    process.assert_called_once()
+    sleep.assert_not_called()
+
+
+def test_run_cli_reports_subprocess_timeout_without_retry(cli_process) -> None:
+    process, sleep, _ = cli_process
+    process.side_effect = subprocess.TimeoutExpired(
+        ["cnmv"], 30, b"partial", b"diagnostic"
+    )
+    with pytest.raises(
+        pytest.fail.Exception, match="TimeoutExpired.*limit=30.0s.*partial.*diagnostic"
+    ):
+        run_cli("filing", "compare", deadline=30, timeout=900)
+    process.assert_called_once()
+    sleep.assert_not_called()
+
+
+def test_run_cli_shares_deadline_between_commands(cli_process) -> None:
+    process, _, now = cli_process
+
+    def complete(*args, **kwargs):
+        now[0] += 5
+        return subprocess.CompletedProcess(args[0], 0, "result", "")
+
+    process.side_effect = complete
+    run_cli("filing", "list", deadline=10)
+    run_cli("filing", "download", deadline=10, timeout=360)
+    with pytest.raises(pytest.fail.Exception, match="deadline exhausted"):
+        run_cli("filing", "compare", deadline=10, timeout=900)
+    assert [call.kwargs["timeout"] for call in process.call_args_list] == [10, 5]
+
+
+def test_run_cli_does_not_sleep_past_deadline(cli_process) -> None:
+    process, sleep, _ = cli_process
+    process.return_value = subprocess.CompletedProcess(
+        ["cnmv"], 1, "", "Error: CNMV request failed: [retryable] ReadTimeout"
+    )
+    with pytest.raises(pytest.fail.Exception, match="deadline leaves no time to retry"):
+        run_cli("filing", "list", deadline=10)
+    process.assert_called_once()
+    sleep.assert_not_called()
+
+
+def run_cli(*arguments: str, deadline: float, timeout: int = 120) -> str:
+    command = ["cnmv", *arguments]
+    for attempt in range(1, 3):
+        started = time.monotonic()
+        remaining = deadline - started
+        if remaining <= 0:
+            pytest.fail(f"Live CNMV deadline exhausted before {' '.join(command)}")
+        attempt_timeout = min(timeout, remaining)
+        print(
+            f"Running {' '.join(command)} (attempt {attempt}/2, "
+            f"timeout={attempt_timeout:.1f}s)",
+            flush=True,
+        )
+        try:
+            result = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                timeout=attempt_timeout,
+                check=False,
+            )
+        except subprocess.TimeoutExpired as exc:
+            pytest.fail(
+                f"{' '.join(command)} attempt {attempt}/2: TimeoutExpired after "
+                f"{time.monotonic() - started:.1f}s (limit={attempt_timeout:.1f}s); "
+                f"stdout={exc.stdout!r}; stderr={exc.stderr!r}"
+            )
+        elapsed = time.monotonic() - started
+        print(
+            f"Attempt {attempt}/2 finished in {elapsed:.1f}s, exit={result.returncode}",
+            flush=True,
+        )
+        if result.returncode == 0:
+            return result.stdout
+        error = result.stderr or result.stdout
+        if attempt == 1 and result.stderr.startswith(
+            "Error: CNMV request failed: [retryable] "
+        ):
+            if deadline - time.monotonic() <= RETRY_DELAY:
+                pytest.fail(f"Live CNMV deadline leaves no time to retry: {error}")
+            print(f"Retrying in {RETRY_DELAY}s: {error}", flush=True)
+            time.sleep(RETRY_DELAY)
+            continue
+        pytest.fail(
+            f"{' '.join(command)} attempt {attempt}/2 failed after {elapsed:.1f}s: {error}"
+        )
+
+
+@pytest.mark.skipif(
     os.environ.get("CNMV_LIVE_TESTS") != "1",
     reason="set CNMV_LIVE_TESTS=1 to contact the real CNMV website",
 )
-
-
-def run_cli(*arguments: str, timeout: int = 120) -> str:
-    print(f"Running cnmv {' '.join(arguments)}", flush=True)
-    for attempt in range(2):
-        result = subprocess.run(
-            ["cnmv", *arguments],
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            check=False,
-        )
-        if (
-            attempt == 0
-            and result.returncode != 0
-            and "CNMV request failed" in result.stderr
-        ):
-            print(f"Retrying one upstream failure: {result.stderr}", flush=True)
-            time.sleep(3)
-            continue
-        break
-    assert result.returncode == 0, result.stderr or result.stdout
-    return result.stdout
-
-
 def test_live_list_download_and_compare(tmp_path) -> None:
+    deadline = time.monotonic() + SMOKE_TIMEOUT
     filings = [
         json.loads(line)
-        for line in run_cli("filing", "list", "--nif", "A08001851").splitlines()
+        for line in run_cli(
+            "filing", "list", "--nif", "A08001851", deadline=deadline
+        ).splitlines()
     ]
     assert filings, "CNMV returned no filings for the smoke-test issuer"
     for filing in filings:
@@ -95,6 +217,7 @@ def test_live_list_download_and_compare(tmp_path) -> None:
             "--output",
             str(output),
             timeout=360,
+            deadline=deadline,
         )
     )
     content = output.read_bytes()
@@ -118,6 +241,7 @@ def test_live_list_download_and_compare(tmp_path) -> None:
             "--database",
             str(database),
             timeout=900,
+            deadline=deadline,
         )
     )
     for label in ("older", "newer"):
