@@ -12,7 +12,7 @@ from unittest.mock import Mock
 import pytest
 
 SMOKE_TIMEOUT = 16 * 60
-RETRY_DELAY = 10
+RETRY_DELAY = 60
 
 
 @pytest.fixture
@@ -38,14 +38,14 @@ def test_run_cli_retries_transient_failure_once(cli_process, capsys, recovers) -
     success = subprocess.CompletedProcess(["cnmv"], 0, "result", "")
     process.side_effect = [failure, success if recovers else failure]
     if recovers:
-        assert run_cli("filing", "list", deadline=60) == "result"
+        assert run_cli("filing", "list", deadline=120) == "result"
     else:
         with pytest.raises(pytest.fail.Exception, match="attempt 2/2.*ReadTimeout"):
-            run_cli("filing", "list", deadline=60)
+            run_cli("filing", "list", deadline=120)
     assert process.call_count == 2
-    sleep.assert_called_once_with(10)
-    assert [call.kwargs["timeout"] for call in process.call_args_list] == [60, 50]
-    assert now[0] == 10
+    sleep.assert_called_once_with(60)
+    assert [call.kwargs["timeout"] for call in process.call_args_list] == [120, 60]
+    assert now[0] == 60
     assert "Attempt 1/2 finished in 0.0s, exit=1" in capsys.readouterr().out
 
 
@@ -101,17 +101,32 @@ def test_run_cli_does_not_sleep_past_deadline(cli_process) -> None:
         ["cnmv"], 1, "", "Error: CNMV request failed: [retryable] ReadTimeout"
     )
     with pytest.raises(pytest.fail.Exception, match="deadline leaves no time to retry"):
-        run_cli("filing", "list", deadline=10)
+        run_cli("filing", "list", deadline=60)
     process.assert_called_once()
     sleep.assert_not_called()
 
 
-def run_cli(*arguments: str, deadline: float, timeout: int = 120) -> str:
+def write_summary(path: str | None, text: str) -> None:
+    if path:
+        with open(path, "a", encoding="utf-8") as summary:
+            print(text, file=summary)
+
+
+def run_cli(
+    *arguments: str,
+    deadline: float,
+    timeout: int = 120,
+    summary_path: str | None = None,
+) -> str:
     command = ["cnmv", *arguments]
+    stage = " ".join(command[:3])
     for attempt in range(1, 3):
         started = time.monotonic()
         remaining = deadline - started
         if remaining <= 0:
+            write_summary(
+                summary_path, f"| {stage} | — | — | Not started: deadline exhausted |"
+            )
             pytest.fail(f"Live CNMV deadline exhausted before {' '.join(command)}")
         attempt_timeout = min(timeout, remaining)
         print(
@@ -128,6 +143,11 @@ def run_cli(*arguments: str, deadline: float, timeout: int = 120) -> str:
                 check=False,
             )
         except subprocess.TimeoutExpired as exc:
+            write_summary(
+                summary_path,
+                f"| {stage} | {attempt}/2 | {time.monotonic() - started:.1f}s "
+                "| TimeoutExpired |",
+            )
             pytest.fail(
                 f"{' '.join(command)} attempt {attempt}/2: TimeoutExpired after "
                 f"{time.monotonic() - started:.1f}s (limit={attempt_timeout:.1f}s); "
@@ -137,6 +157,12 @@ def run_cli(*arguments: str, deadline: float, timeout: int = 120) -> str:
         print(
             f"Attempt {attempt}/2 finished in {elapsed:.1f}s, exit={result.returncode}",
             flush=True,
+        )
+        outcome = f"exit {result.returncode}"
+        if result.returncode == 0 and attempt == 2:
+            outcome += " (recovered after retry)"
+        write_summary(
+            summary_path, f"| {stage} | {attempt}/2 | {elapsed:.1f}s | {outcome} |"
         )
         if result.returncode == 0:
             return result.stdout
@@ -160,10 +186,24 @@ def run_cli(*arguments: str, deadline: float, timeout: int = 120) -> str:
 )
 def test_live_list_download_and_compare(tmp_path) -> None:
     deadline = time.monotonic() + SMOKE_TIMEOUT
+    summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
+    write_summary(
+        summary_path,
+        "### Live CNMV command attempts\n\n"
+        f"Retry delay: {RETRY_DELAY}s; "
+        f"shared smoke budget: {SMOKE_TIMEOUT // 60} minutes.\n\n"
+        "| Command | Attempt | Duration | Process result |\n"
+        "| --- | --- | --- | --- |",
+    )
     filings = [
         json.loads(line)
         for line in run_cli(
-            "filing", "list", "--nif", "A08001851", deadline=deadline
+            "filing",
+            "list",
+            "--nif",
+            "A08001851",
+            deadline=deadline,
+            summary_path=summary_path,
         ).splitlines()
     ]
     assert filings, "CNMV returned no filings for the smoke-test issuer"
@@ -218,6 +258,7 @@ def test_live_list_download_and_compare(tmp_path) -> None:
             str(output),
             timeout=360,
             deadline=deadline,
+            summary_path=summary_path,
         )
     )
     content = output.read_bytes()
@@ -242,6 +283,7 @@ def test_live_list_download_and_compare(tmp_path) -> None:
             str(database),
             timeout=900,
             deadline=deadline,
+            summary_path=summary_path,
         )
     )
     for label in ("older", "newer"):
@@ -263,6 +305,7 @@ def test_live_list_download_and_compare(tmp_path) -> None:
         assert change["closest_old_text"]
         assert math.isfinite(change["distance"])
     assert any(database.iterdir()), "Comparison did not persist its database"
+    write_summary(summary_path, "\nAll live validations passed.")
     print(
         json.dumps(
             {
