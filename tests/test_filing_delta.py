@@ -149,3 +149,36 @@ def test_chroma_batch_size_respects_the_active_client_limit() -> None:
             return 2
 
     assert filing_delta._chroma_batch_size(Client()) == 2
+
+
+def test_compare_preserves_visible_container_text_in_document_order(monkeypatch, tmp_path) -> None:
+    older = (b'<html xmlns="http://www.w3.org/1999/xhtml"><body>Intro'
+             b'<div>Revenue 4<p>Staff 20</p>After <b>tax</b>'
+             b'<script>ignored</script> tail</div>End</body></html>')
+    newer = older.replace(b'Revenue 4', b'Revenue 20')
+
+    def fake_download(url, output):
+        content = older if url == 'older' else newer
+        output.write_bytes(content)
+        return {'final_url': url, 'sha256': hashlib.sha256(content).hexdigest(),
+                'byte_count': len(content), 'content_type': 'application/xhtml+xml'}
+
+    class Collection:
+        def query(self, query_embeddings, n_results):
+            return {'distances': [[0.0]] * len(query_embeddings),
+                    'documents': [['old']] * len(query_embeddings)}
+
+    class Client:
+        def get_max_batch_size(self):
+            return 1000
+
+    monkeypatch.setattr(filing_delta, 'download_document', fake_download)
+    monkeypatch.setattr(filing_delta.chromadb, 'PersistentClient', lambda **_: Client(), raising=False)
+    monkeypatch.setattr(filing_delta, '_store_document', lambda *args: Collection())
+
+    assert filing_delta._visible_chunks(newer) == [
+        'Intro', 'Revenue 20', 'Staff 20', 'After tax tail', 'End'
+    ]
+    result = filing_delta.compare_filings('older', 'newer', tmp_path / 'chroma')
+    assert result['change_count'] == 1
+    assert [change['new_text'] for change in result['changes']] == ['Revenue 20']
