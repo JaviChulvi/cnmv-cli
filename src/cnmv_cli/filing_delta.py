@@ -108,32 +108,30 @@ def _visible_chunks(content: bytes) -> list[str]:
         if _local_name(document) == "xbrl":
             return _split_chunk(" ".join(" ".join(document.itertext()).split()))
         raise UnsupportedDocumentError("HTML/XHTML document has no body")
-    body = bodies[0]
-    for hidden in [element for element in body.iterdescendants() if _is_hidden_element(element)]:
-        parent = hidden.getparent()
-        if parent is not None:
-            parent.remove(hidden)
-
-    candidates = [
-        element
-        for element in body.iterdescendants()
-        if isinstance(element.tag, str) and _local_name(element) in _BLOCK_NAMES
-    ]
-    candidate_set = set(candidates)
-    nonleaf_candidates = set()
-    for element in candidates:
-        parent = element.getparent()
-        while parent is not None and parent not in candidate_set:
-            parent = parent.getparent()
-        if parent is not None:
-            nonleaf_candidates.add(parent)
-    blocks = [element for element in candidates if element not in nonleaf_candidates]
-    if not blocks:
-        blocks = [body]
     chunks: list[str] = []
-    for block in blocks:
-        normalized = " ".join(" ".join(block.itertext()).split())
+    text_parts: list[str] = []
+
+    def flush() -> None:
+        normalized = " ".join(" ".join(text_parts).split())
         chunks.extend(_split_chunk(normalized))
+        text_parts.clear()
+
+    def visit(element: etree._Element) -> None:
+        if element.text:
+            text_parts.append(element.text)
+        for child in element:
+            if isinstance(child.tag, str) and not _is_hidden_element(child):
+                is_block = _local_name(child) in _BLOCK_NAMES
+                if is_block:
+                    flush()
+                visit(child)
+                if is_block:
+                    flush()
+            if child.tail:
+                text_parts.append(child.tail)
+
+    visit(bodies[0])
+    flush()
     return chunks
 
 
