@@ -94,14 +94,13 @@ def _write_response(
     response: BinaryIO, output: Path, final_url: str
 ) -> dict[str, object]:
     content_length = response.headers.get("Content-Length")  # type: ignore[attr-defined]
+    expected_length: int | None = None
     if content_length is not None:
         normalized_length = content_length.strip()
-        if (
-            normalized_length.isascii()
-            and normalized_length.isdecimal()
-            and int(normalized_length) > MAX_DOWNLOAD_BYTES
-        ):
-            raise UpstreamError("CNMV document exceeds the maximum size")
+        if normalized_length.isascii() and normalized_length.isdecimal():
+            expected_length = int(normalized_length)
+            if expected_length > MAX_DOWNLOAD_BYTES:
+                raise UpstreamError("CNMV document exceeds the maximum size")
 
     output.parent.mkdir(parents=True, exist_ok=True)
     temporary_path: Path | None = None
@@ -121,6 +120,13 @@ def _write_response(
                     raise UpstreamError("CNMV document exceeds the maximum size")
                 digest.update(chunk)
                 temporary.write(chunk)
+        if expected_length is not None and byte_count != expected_length:
+            raise UpstreamError.from_request(
+                ConnectionError(
+                    f"Content-Length was {expected_length}, received {byte_count} bytes"
+                ),
+                final_url,
+            )
         os.replace(temporary_path, output)
         temporary_path = None
     finally:

@@ -263,3 +263,49 @@ def test_download_document_wraps_url_errors(
     assert ("[retryable]" in message) == retryable
     assert kind in message
     assert DOCUMENT_URL in message
+
+
+def test_truncated_http_response_preserves_existing_output_and_cleans_temp(tmp_path) -> None:
+    import http.client
+    import io
+
+    class Socket:
+        def makefile(self, *args, **kwargs):
+            return io.BytesIO(b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\nabc")
+
+    response = http.client.HTTPResponse(Socket())
+    response.begin()
+    output = tmp_path / "document"
+    output.write_bytes(b"existing")
+
+    with pytest.raises(download.UpstreamError, match=r"\[retryable\].*Content-Length"):
+        download._write_response(response, output, DOCUMENT_URL)
+
+    assert output.read_bytes() == b"existing"
+    assert list(tmp_path.glob(".*.part")) == []
+
+
+@pytest.mark.parametrize(("length", "body"), [("3", b"abc"), ("0", b"")])
+def test_download_accepts_matching_content_length(monkeypatch, tmp_path, length, body) -> None:
+    install_opener(
+        monkeypatch,
+        [FakeResponse(DOCUMENT_URL, headers={"Content-Length": length}, chunks=[body])],
+    )
+    output = tmp_path / "document"
+    assert download_document(DOCUMENT_URL, output)["byte_count"] == len(body)
+    assert output.read_bytes() == body
+
+
+def test_download_rejects_body_longer_than_declared(monkeypatch, tmp_path) -> None:
+    install_opener(
+        monkeypatch,
+        [FakeResponse(DOCUMENT_URL, headers={"Content-Length": "2"}, chunks=[b"abc"])],
+    )
+    output = tmp_path / "document"
+    output.write_bytes(b"existing")
+
+    with pytest.raises(download.UpstreamError, match="Content-Length"):
+        download_document(DOCUMENT_URL, output)
+
+    assert output.read_bytes() == b"existing"
+    assert list(tmp_path.glob(".*.part")) == []
